@@ -1,10 +1,8 @@
 from flask import Flask, request, jsonify, send_file
 import cv2
 import numpy as np
-import torch
 import os
 from werkzeug.utils import secure_filename
-from segment_anything import SamPredictor, sam_model_registry
 from flask_cors import CORS
 import mediapipe as mp
 import io
