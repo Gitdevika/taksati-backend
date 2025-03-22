@@ -1,0 +1,8 @@
+Flask==2.3.2
+Flask-Cors==4.0.0
+opencv-python==4.8.0.76
+numpy==1.24.3
+torch==2.0.1
+mediapipe==0.10.0
+werkzeug==2.3.7
+segment-anything==1.0
