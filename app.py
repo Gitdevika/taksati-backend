@@ -133,6 +133,64 @@ def try_on():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+    
+@app.route('/tryon-pants', methods=['POST'])
+def try_on_pants():
+    try:
+        user_img = None
+        pants_img = None
+        debug_info = {}  # For tracking what's happening
+
+        # Process user image
+        if 'user_image' in request.files:
+            user_image = request.files['user_image']
+            debug_info['user_source'] = 'file'
+            debug_info['user_filename'] = user_image.filename
+            
+            user_path = os.path.join(UPLOAD_FOLDER, secure_filename(user_image.filename))
+            user_image.save(user_path)
+            user_img = cv2.imread(user_path)
+            if user_img is not None:
+                user_img = cv2.cvtColor(user_img, cv2.COLOR_BGR2RGB)
+                debug_info['user_image_loaded'] = True
+            else:
+                debug_info['user_image_loaded'] = False
+
+        # Process pants image
+        if 'bottom_image' in request.files:
+            pants_image = request.files['bottom_image']
+            debug_info['pants_source'] = 'file'
+            debug_info['pants_filename'] = pants_image.filename
+            
+            pants_path = os.path.join(UPLOAD_FOLDER, secure_filename(pants_image.filename))
+            pants_image.save(pants_path)
+            pants_img = cv2.imread(pants_path)
+            if pants_img is not None:
+                pants_img = cv2.cvtColor(pants_img, cv2.COLOR_BGR2RGB)
+                debug_info['pants_image_loaded'] = True
+            else:
+                debug_info['pants_image_loaded'] = False
+        else:
+            return jsonify({"error": "No pants image provided"}), 400
+
+        if user_img is None or pants_img is None:
+            raise ValueError(f"Failed to load images: {debug_info}")
+
+        # Process the images for pants overlay
+        output_path = overlay_pants_on_user(user_img, pants_img)
+        debug_info['output_path'] = output_path
+        print(f"Debug info: {debug_info}")
+
+        return send_file(output_path, mimetype='image/png')
+
+    except Exception as e:
+        print(f"Error in /tryon-pants: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 def bytes_to_cv_image(image_bytes):
     """Convert image bytes (base64) to OpenCV image with alpha channel support"""
@@ -187,9 +245,16 @@ def bytes_to_cv_image(image_bytes):
 
 def overlay_images_direct(user_img, shirt_img):
     """
-    Same functionality as overlay_images but works directly with image arrays
-    instead of file paths
+    Overlay shirt onto the user image.
+    Ensures black pixels are included in the overlay.
     """
+    target_width = 400
+    target_height = 600
+    scale_factor = min(target_width / user_img.shape[1], target_height / user_img.shape[0])
+    user_img = cv2.resize(user_img, None, fx=scale_factor, fy=scale_factor)
+
+
+
     # Initialize result_img
     result_img = user_img.copy()
     
@@ -222,7 +287,7 @@ def overlay_images_direct(user_img, shirt_img):
                      int(landmarks[mp_pose.PoseLandmark.RIGHT_HIP].y * h))
         
         # Calculate torso height
-        torso_height = abs((left_hip[1] + right_hip[1])//2 - (left_shoulder[1] + right_shoulder[1])//2)
+        torso_height = abs((left_hip[1] + right_hip[1]) // 2 - (left_shoulder[1] + right_shoulder[1]) // 2)
         
         # Calculate neck position
         neck_y = min(left_shoulder[1], right_shoulder[1]) - int(shoulder_width * 0.25)
@@ -248,8 +313,8 @@ def overlay_images_direct(user_img, shirt_img):
             y_top_padded = max(0, y_shirt - int(h_shirt * 0.1))
             h_padded = min(shirt_img.shape[0] - y_top_padded, h_shirt + int(h_shirt * 0.1))
             
-            shirt_only = shirt_img[y_top_padded:y_top_padded+h_padded, x_shirt:x_shirt+w_shirt]
-            shirt_mask_only = shirt_mask[y_top_padded:y_top_padded+h_padded, x_shirt:x_shirt+w_shirt]
+            shirt_only = shirt_img[y_top_padded:y_top_padded + h_padded, x_shirt:x_shirt + w_shirt]
+            shirt_mask_only = shirt_mask[y_top_padded:y_top_padded + h_padded, x_shirt:x_shirt + w_shirt]
             
             # Debug: Check shirt_only and shirt_mask_only
             print(f"Shirt only shape: {shirt_only.shape}")
@@ -289,28 +354,22 @@ def overlay_images_direct(user_img, shirt_img):
                     x_pos = start_x + j
                     
                     # Make sure we're within image bounds and mask is valid
-                    if (0 <= y_pos < h and 0 <= x_pos < w and 
+                    if (0 <= y_pos < h and 0 <= x_pos < w and
                         i < resized_mask.shape[0] and j < resized_mask.shape[1] and
                         resized_mask[i, j] > 10):
                         
                         # Get the shirt pixel color
                         shirt_pixel = resized_shirt[i, j]
                         
-                        # Skip very bright/white pixels
-                        is_white_or_very_light = (shirt_pixel[0] > 240 and 
-                                                shirt_pixel[1] > 240 and 
-                                                shirt_pixel[2] > 240)
+                        # Apply alpha blending for all colors (including black)
+                        alpha = min(1.0, resized_mask[i, j] / 255.0)
                         
-                        if not is_white_or_very_light:
-                            # Apply alpha blending
-                            alpha = min(1.0, resized_mask[i, j] / 255.0)
-                            
-                            # Skip pixels with low alpha
-                            if alpha > 0.2:
-                                result_img[y_pos, x_pos] = (
-                                    alpha * shirt_pixel + 
-                                    (1 - alpha) * result_img[y_pos, x_pos]
-                                ).astype(np.uint8)
+                        # Skip pixels with low alpha
+                        if alpha > 0.2:
+                            result_img[y_pos, x_pos] = (
+                                alpha * shirt_pixel +
+                                (1 - alpha) * result_img[y_pos, x_pos]
+                            ).astype(np.uint8)
     else:
         print("Pose detection failed, using original image as result")
     
@@ -320,10 +379,144 @@ def overlay_images_direct(user_img, shirt_img):
     
     return output_path
 
+def overlay_pants_on_user(user_img, pants_img):
+    """
+    Overlay pants onto the user image by detecting hips and placing the pants correctly.
+    """
+    # Resize the user image to a specific dimension (e.g., 600x800)
+    target_width = 400
+    target_height = 600
+    scale_factor = min(target_width / user_img.shape[1], target_height / user_img.shape[0])
+    user_img = cv2.resize(user_img, None, fx=scale_factor, fy=scale_factor)
+
+
+    # Initialize result_img
+    result_img = user_img.copy()
+    
+    # Get user body landmarks using MediaPipe Pose
+    mp_pose = mp.solutions.pose
+    pose = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5)
+    
+    # Detect pose landmarks
+    results = pose.process(user_img)
+    
+    if results.pose_landmarks:
+        landmarks = results.pose_landmarks.landmark
+        
+        # Get image dimensions
+        h, w = user_img.shape[:2]
+        
+        # Extract key points for pants placement (hips)
+        left_hip = (int(landmarks[mp_pose.PoseLandmark.LEFT_HIP].x * w),
+                    int(landmarks[mp_pose.PoseLandmark.LEFT_HIP].y * h))
+        right_hip = (int(landmarks[mp_pose.PoseLandmark.RIGHT_HIP].x * w),
+                     int(landmarks[mp_pose.PoseLandmark.RIGHT_HIP].y * h))
+        
+        # Calculate hip width
+        hip_width = abs(right_hip[0] - left_hip[0])
+        
+        # Calculate the vertical position for the top of the pants
+        pants_top_y = (left_hip[1] + right_hip[1]) // 2  # Use the average y-coordinate of the hips
+        
+        # Calculate the distance from hips to ankles
+        left_ankle = (int(landmarks[mp_pose.PoseLandmark.LEFT_ANKLE].x * w),
+                      int(landmarks[mp_pose.PoseLandmark.LEFT_ANKLE].y * h))
+        right_ankle = (int(landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].x * w),
+                       int(landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE].y * h))
+        
+        # Calculate the vertical distance from hips to ankles
+        leg_height = abs((left_ankle[1] + right_ankle[1]) // 2 - pants_top_y)
+        
+        # Adjust the pants_top_y to move the pants higher
+        pants_top_y -= int(leg_height * 0.17)  # Adjust this factor as needed
+        
+        # Process pants image - extract it more carefully
+        pants_mask = extract_shirt_improved(pants_img)  # Reuse the shirt mask extraction logic
+        
+        # Debug: Check if pants_mask is valid
+        print(f"Pants mask shape: {pants_mask.shape if pants_mask is not None else 'None'}")
+        
+        # Find pants contours
+        pants_contours, _ = cv2.findContours(pants_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if len(pants_contours) > 0:
+            largest_contour = max(pants_contours, key=cv2.contourArea)
+            x_pants, y_pants, w_pants, h_pants = cv2.boundingRect(largest_contour)
+            
+            # Extract just the pants portion with padding
+            y_top_padded = max(0, y_pants - int(h_pants * 0.1))
+            h_padded = min(pants_img.shape[0] - y_top_padded, h_pants + int(h_pants * 0.1))
+            
+            pants_only = pants_img[y_top_padded:y_top_padded+h_padded, x_pants:x_pants+w_pants]
+            pants_mask_only = pants_mask[y_top_padded:y_top_padded+h_padded, x_pants:x_pants+w_pants]
+            
+            # Debug: Check pants_only and pants_mask_only
+            print(f"Pants only shape: {pants_only.shape}")
+            print(f"Pants mask only shape: {pants_mask_only.shape}")
+            
+            # Calculate new width based on hips with some extra for fit
+            new_width = int(hip_width * 2.0)  # Adjust this factor as needed
+            
+            # Maintain aspect ratio
+            aspect_ratio = w_pants / h_padded
+            new_height = int(new_width / aspect_ratio)
+            
+            # Ensure the pants height is proportional to the leg height
+            if new_height < leg_height * 0.85:  # Adjust this factor as needed
+                new_height = int(leg_height * 0.85)
+                new_width = int(new_height * aspect_ratio)
+            elif new_height > leg_height * 0.9:
+               new_height = int(leg_height * 1.28)
+            
+            # Resize pants and mask
+            resized_pants = cv2.resize(pants_only, (new_width, new_height))
+            resized_mask = cv2.resize(pants_mask_only, (new_width, new_height))
+            
+            # Debug: Check resized_pants and resized_mask
+            print(f"Resized pants shape: {resized_pants.shape}")
+            print(f"Resized mask shape: {resized_mask.shape}")
+            
+            # Center the pants horizontally
+            center_x = (left_hip[0] + right_hip[0]) // 2
+            start_x = center_x - new_width // 2
+            
+            # Overlay the pants
+            for i in range(new_height):
+                for j in range(new_width):
+                    y_pos = pants_top_y + i
+                    x_pos = start_x + j
+                    
+                    # Make sure we're within image bounds and mask is valid
+                    if (0 <= y_pos < h and 0 <= x_pos < w and 
+                        i < resized_mask.shape[0] and j < resized_mask.shape[1] and
+                        resized_mask[i, j] > 10):
+                        
+                        # Get the pants pixel color
+                        pants_pixel = resized_pants[i, j]
+                        
+                        # Apply alpha blending for all colors (including black)
+                        alpha = min(1.0, resized_mask[i, j] / 255.0)
+                        
+                        # Skip pixels with low alpha
+                        if alpha > 0.2:
+                            result_img[y_pos, x_pos] = (
+                                alpha * pants_pixel + 
+                                (1 - alpha) * result_img[y_pos, x_pos]
+                            ).astype(np.uint8)
+    else:
+        print("Pose detection failed, using original image as result")
+    
+    # Save the output
+    output_path = os.path.join(RESULT_FOLDER, "tryon_pants_output.png")
+    cv2.imwrite(output_path, cv2.cvtColor(result_img, cv2.COLOR_RGB2BGR))
+    
+    return output_path
+
 
 def extract_shirt_improved(image):
     """
-    Improved shirt extraction that works with both regular and transparent images
+    Improved shirt extraction that works with both regular and transparent images.
+    Ensures black pixels are included in the mask.
     """
     # Check if the image has an alpha channel from previous processing
     has_alpha = hasattr(image, 'alpha_channel') and image.alpha_channel is not None
@@ -333,37 +526,35 @@ def extract_shirt_improved(image):
         # Use the alpha channel directly as the mask
         shirt_mask = image.alpha_channel
         # Clean up the mask
-        kernel = np.ones((5,5), np.uint8)
+        kernel = np.ones((5, 5), np.uint8)
         shirt_mask = cv2.morphologyEx(shirt_mask, cv2.MORPH_CLOSE, kernel)
-        return shirt_mask
-    
-    # Otherwise use the original method for non-transparent images
-    # Convert to grayscale for better background detection
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    
-    # Create a mask for the likely background (black or very dark colors)
-    _, background_mask = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
-    
-    # Invert to get the foreground (shirt)
-    shirt_mask = cv2.bitwise_not(background_mask)
-    
-    # Clean up the mask
-    kernel = np.ones((5,5), np.uint8)
-    shirt_mask = cv2.morphologyEx(shirt_mask, cv2.MORPH_CLOSE, kernel)
-    shirt_mask = cv2.morphologyEx(shirt_mask, cv2.MORPH_OPEN, kernel)
-    
-    # Fill holes in the mask
-    contours, _ = cv2.findContours(shirt_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        # Get the largest contour (should be the shirt)
-        largest_contour = max(contours, key=cv2.contourArea)
+    else:
+        # Convert to grayscale for better background detection
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         
-        # Create a filled mask from the largest contour
-        filled_mask = np.zeros_like(shirt_mask)
-        cv2.drawContours(filled_mask, [largest_contour], 0, 255, -1)
+        # Create a mask for the likely background (black or very dark colors)
+        _, background_mask = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
         
-        # Use the filled mask
-        shirt_mask = filled_mask
+        # Invert to get the foreground (shirt)
+        shirt_mask = cv2.bitwise_not(background_mask)
+        
+        # Clean up the mask
+        kernel = np.ones((5, 5), np.uint8)
+        shirt_mask = cv2.morphologyEx(shirt_mask, cv2.MORPH_CLOSE, kernel)
+        shirt_mask = cv2.morphologyEx(shirt_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Fill holes in the mask
+        contours, _ = cv2.findContours(shirt_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # Get the largest contour (should be the shirt)
+            largest_contour = max(contours, key=cv2.contourArea)
+            
+            # Create a filled mask from the largest contour
+            filled_mask = np.zeros_like(shirt_mask)
+            cv2.drawContours(filled_mask, [largest_contour], 0, 255, -1)
+            
+            # Use the filled mask
+            shirt_mask = filled_mask
     
     return shirt_mask
 
